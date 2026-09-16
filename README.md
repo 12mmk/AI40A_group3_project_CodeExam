@@ -1,6 +1,6 @@
 # CodeExam
 
-> A browser-based coding learning and assessment platform for programming education.
+> A browser-based sandbox environment for students to use for programming exams.
 
 CodeExam is a web-based platform designed to bring **learning, coding practice, assignments, community interaction, and programming exams** into one place.
 
