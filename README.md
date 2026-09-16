@@ -28,19 +28,16 @@ In many programming courses, exams are still written by hand on paper. Students 
 
 | Layer | Technology |
 |---|---|
-| Frontend | React, Monaco Editor |
-| Backend | Node.js / Express |
-| Database | PostgreSQL |
-| Code execution | Judge0 (self-hosted, Docker) |
+| Frontend |  |
+| Backend |  |
+| Database | |
+| Code execution | |
 
 Student code never runs on the application server. All execution is delegated to a self-hosted Judge0 instance, which runs each submission in an isolated sandbox with CPU, memory, and wall-clock limits.
 
 ## Getting Started
 
 ### Prerequisites
-- Node.js 18+
-- Docker and Docker Compose
-- PostgreSQL 14+
 
 
 
