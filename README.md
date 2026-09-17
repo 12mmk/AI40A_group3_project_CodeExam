@@ -4,7 +4,7 @@
 
 CodeExam is a web-based platform designed to bring **learning, coding practice, assignments, community interaction, and programming exams** into one place.
 
-Inspired by platforms such as **Boot.dev** and **Stanford Code in Place**, CodeExam allows students to learn programming concepts, solve coding problems directly in the browser, receive automatic feedback, participate in discussions, and take structured programming exams.
+CodeExam allows students to write code in a sandbox environment during exams where only certain features are allowed. This platform is made to eliminate hand-written code during programming exams. 
 
 For teachers, the platform provides tools to create courses, lessons, assignments, coding questions, and exams while automatically evaluating student submissions using a sandboxed code execution environment.
 
