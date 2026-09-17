@@ -3,6 +3,8 @@
 A browser-based coding exam platform. Students write and run real code during the exam; the system grades it against hidden test cases automatically, and teachers review, override and export instead of reading handwritten code on paper.
 
 > Project plan for the Integrated Project · six-person team · about 21 weeks
+>
+> **Stack:** Python · Flask · Jinja2 · MySQL 8 · Monaco · self-hosted Judge0 · Docker
 
 ---
 
@@ -92,8 +94,8 @@ They are assessed on something they never do in real life: writing code without 
 | Module requirement | How we meet it |
 | --- | --- |
 | Working end-to-end web application | Three roles, full exam lifecycle, deployed on our own server |
-| Backend REST API | FastAPI or Flask, about 40 endpoints |
-| HTML, CSS, JavaScript frontend | Nine pages, plain JS plus the Monaco editor. No React |
+| Backend REST API | Flask, about 30 JSON endpoints alongside the page routes |
+| HTML, CSS, JavaScript frontend | Nine Jinja-rendered pages, plain JS where the page needs to be live, plus the Monaco editor. No React |
 | MySQL relational database | 13 tables with real relationships, managed with Alembic migrations |
 | Git and GitHub with meaningful history | Branch protection, pull request review, one issue per task |
 | At least 35 functional requirements | 54, listed in section 6 |
@@ -114,10 +116,24 @@ The first draft of this idea specified some things that do not fit our brief or 
 | Draft said | We are doing | Why |
 | --- | --- | --- |
 | PostgreSQL | **MySQL 8** | Our brief requires MySQL. No technical downside for this workload |
-| Node.js or Python | **Python, FastAPI or Flask** | Our brief requires it, and we are taught Flask in depth, so we can get help debugging |
-| React frontend | **Plain HTML, CSS, JS + Monaco** | React costs the team 25–40 hours and the brief does not ask for it. Those hours go into the grading pipeline instead |
+| Node.js or Python | **Python + Flask** | Settled. We are taught Flask in depth, so we have a lecturer who can debug our code with us |
+| React frontend | **Jinja templates + plain JS + Monaco** | React costs the team 25–40 hours and the brief does not ask for it. Jinja renders on the server, so most pages need no JavaScript at all. Those hours go into the grading pipeline instead |
 | Build our own Docker sandbox | **Self-host Judge0** | See section 9. This is the most important decision in the project |
 | Webcam snapshots | **Cut entirely** | See section 14 |
+
+### What Jinja changes, and what it does not
+
+Jinja renders HTML on the server. Flask builds the page, fills in the data, and sends finished HTML to the browser. Most of our pages — exam lists, authoring forms, results tables, admin — need no JavaScript beyond a little form handling.
+
+Three places still need JSON and JavaScript, because the page has to change without reloading:
+
+- **The exam screen.** The Monaco editor, the countdown, auto-save, Run and Submit all talk to JSON endpoints. Reloading the page mid-exam is not acceptable.
+- **The live monitoring dashboard.** Polls a JSON endpoint every few seconds.
+- **Grading progress.** Polls while submissions are being graded.
+
+So the architecture is deliberately **hybrid**: Jinja page routes for everything a human reads, JSON endpoints for everything that has to update live. This still satisfies the module's REST API requirement — around 30 JSON endpoints — and it means five of our nine pages are far simpler to build than they would be in a single-page app.
+
+Say this explicitly in the report. "We chose server-side rendering for the pages that do not change and a JSON API only for the parts that must update live" is a design decision, not a shortcut.
 
 ---
 
@@ -237,14 +253,18 @@ The first draft of this idea specified some things that do not fit our brief or 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  BROWSER                                                 │
-│  Monaco editor (help features disabled) · timer ·        │
-│  question navigator · teacher dashboards                 │
-└───────────────┬──────────────────────────────────────────┘
-                │ JSON over HTTPS  (+ polling for live views)
-┌───────────────▼──────────────────────────────────────────┐
-│  API — FastAPI or Flask                                  │
-│  auth · exams · questions · sessions · submissions ·     │
-│  grading orchestration · integrity events · reports      │
+│  Jinja-rendered pages (forms, tables, dashboards)        │
+│  + JS only where needed: Monaco editor, countdown,       │
+│    auto-save, Run/Submit, polling for live views         │
+└───────┬──────────────────────────┬───────────────────────┘
+        │ HTML page requests       │ JSON (fetch)
+┌───────▼──────────────────────────▼───────────────────────┐
+│  FLASK                                                   │
+│  ├─ page routes  → render_template(...)  [Jinja]         │
+│  └─ api routes   → jsonify(...)          [REST]          │
+│                                                          │
+│  blueprints: auth · exams · questions · sessions ·       │
+│  submissions · monitor · reports · admin                 │
 │                                                          │
 │  server-authoritative clock — the browser never decides  │
 │  when time is up                                         │
@@ -419,35 +439,87 @@ audit_log          (id, user_id, action, entity, entity_id, created_at)
 
 ---
 
-## 11. The API — about 40 endpoints
+## 11. Routes — pages and API
+
+Flask serves two kinds of route. Keep them in separate blueprints so it is always obvious which is which: page routes return HTML, API routes return JSON and never render a template.
+
+### Page routes (Jinja)
+
+| Method | Route | Renders |
+| --- | --- | --- |
+| GET | `/login` | Login form |
+| GET | `/` | Role-aware home: student exam list or teacher exam list |
+| GET | `/exams/<id>/instructions` | Rules and duration, with the Start button |
+| GET | `/exams/<id>/take` | The exam screen — the only page with significant JS |
+| GET | `/exams/new`, `/exams/<id>/edit` | Exam authoring forms |
+| GET | `/exams/<id>/questions/<qid>/edit` | Question and test-case editor |
+| GET | `/exams/<id>/preview` | Student view, read-only |
+| GET | `/exams/<id>/monitor` | Live monitoring shell; polls the API for updates |
+| GET | `/submissions/<id>` | Submission review, with the override form |
+| GET | `/exams/<id>/results` | Results table and analytics |
+| GET | `/admin/users`, `/admin/classes`, `/admin/audit` | Admin pages |
+
+Form POSTs (create exam, add question, override a grade, upload roster) post to the same blueprint and redirect on success — the standard post/redirect/get pattern. **Every form must carry a CSRF token** (see section 16).
+
+### JSON API routes (REST)
 
 | Group | Endpoints |
 | --- | --- |
-| Auth | `POST /auth/login` · `POST /auth/logout` · `GET /auth/me` |
-| Exams | `GET /exams` · `POST /exams` · `GET /exams/{id}` · `PATCH /exams/{id}` · `DELETE /exams/{id}` · `POST /exams/{id}/publish` · `POST /exams/{id}/duplicate` · `GET /exams/{id}/preview` |
-| Questions | `POST /exams/{id}/questions` · `PATCH /questions/{id}` · `DELETE /questions/{id}` · `POST /questions/reorder` · `POST /questions/{id}/copy` |
-| Test cases | `POST /questions/{id}/tests` · `PATCH /tests/{id}` · `DELETE /tests/{id}` |
-| Classes | `GET /classes` · `POST /classes` · `POST /classes/{id}/roster` · `POST /exams/{id}/assign` |
-| Sessions | `POST /exams/{id}/start` · `GET /sessions/{id}` · `GET /sessions/{id}/state` · `POST /sessions/{id}/submit` · `POST /sessions/{id}/extend` |
-| Code | `PUT /sessions/{id}/questions/{qid}/code` (auto-save) · `POST /run` (visible tests only) · `POST /submissions` |
-| Grading | `GET /submissions/{id}` · `GET /exams/{id}/submissions` · `POST /questions/{id}/regrade` · `POST /submissions/{id}/override` · `GET /exams/{id}/grading-progress` |
-| Integrity | `POST /sessions/{id}/events` · `GET /exams/{id}/monitor` · `GET /sessions/{id}/integrity` |
-| Reports | `GET /exams/{id}/results` · `GET /exams/{id}/export.csv` · `GET /exams/{id}/analytics` |
-| Admin | `GET/POST/PATCH /users` · `GET /audit` · `GET /health` · `GET /queue/status` |
+| Sessions | `POST /api/exams/<id>/start` · `GET /api/sessions/<id>/state` (time remaining, per-question status) · `POST /api/sessions/<id>/submit` · `POST /api/sessions/<id>/extend` |
+| Code | `PUT /api/sessions/<id>/questions/<qid>/code` (auto-save) · `POST /api/run` (visible tests only) · `POST /api/submissions` |
+| Grading | `GET /api/submissions/<id>` · `POST /api/questions/<id>/regrade` · `GET /api/exams/<id>/grading-progress` |
+| Integrity | `POST /api/sessions/<id>/events` · `GET /api/exams/<id>/monitor` |
+| Exams and questions | `POST /api/questions/reorder` · `POST /api/questions/<id>/copy` · `POST /api/exams/<id>/publish` · `POST /api/exams/<id>/duplicate` |
+| Test cases | `POST /api/questions/<id>/tests` · `PATCH /api/tests/<id>` · `DELETE /api/tests/<id>` |
+| Reports | `GET /api/exams/<id>/analytics` · `GET /exams/<id>/export.csv` (file download, page blueprint) |
+| System | `GET /api/health` · `GET /api/queue/status` |
+
+The JSON endpoints are the ones the exam screen and the dashboards depend on. Everything a teacher fills in as a form goes through a page route instead — there is no reason to write JavaScript to create an exam.
 
 ---
 
-## 12. Frontend — nine pages and the editor
+## 12. Frontend — nine Jinja pages and the editor
 
-1. **Login**
-2. **Student exam list** — upcoming, available now, completed
-3. **Exam instructions** — rules, duration, the warning that the timer cannot be paused
-4. **Exam screen** — question navigator, editor, run panel, timer
-5. **Teacher exam list and authoring** — create exam, add questions and test cases
-6. **Exam preview** — the student view, in read-only mode
-7. **Live monitoring** — who has started, who has submitted, flag counts
-8. **Submission review** — code, output and per-test results side by side, with the override form
-9. **Results and analytics** — table, export, per-question pass rates
+| # | Page | Rendering | JavaScript needed |
+| --- | --- | --- | --- |
+| 1 | Login | Jinja form | None |
+| 2 | Student exam list | Jinja | None |
+| 3 | Exam instructions | Jinja | None |
+| 4 | **Exam screen** | Jinja shell + JS | **Heavy** — Monaco, countdown, auto-save, Run, Submit, integrity events |
+| 5 | Teacher authoring | Jinja forms | Light — add/remove test-case rows |
+| 6 | Exam preview | Jinja, read-only | None |
+| 7 | Live monitoring | Jinja shell + JS | Polling every few seconds |
+| 8 | Submission review | Jinja | None — the override is a normal form POST |
+| 9 | Results and analytics | Jinja + Chart.js | Light — charts only |
+
+Six of nine pages need essentially no JavaScript. That is the main practical benefit of choosing Jinja, and it is why this stack suits a team of beginners.
+
+### Template structure
+
+```
+templates/
+├─ base.html              nav, flash messages, CSS/JS blocks
+├─ auth/login.html
+├─ student/
+│  ├─ exam_list.html
+│  ├─ instructions.html
+│  └─ take.html           the exam screen
+├─ teacher/
+│  ├─ exam_list.html
+│  ├─ exam_form.html
+│  ├─ question_form.html
+│  ├─ preview.html
+│  ├─ monitor.html
+│  ├─ submission_review.html
+│  └─ results.html
+├─ admin/
+│  ├─ users.html  classes.html  audit.html
+└─ partials/
+   ├─ _question_nav.html  _test_case_row.html
+   ├─ _result_table.html  _flash.html
+```
+
+Use `{% extends "base.html" %}` everywhere and put anything repeated into `partials/`. Two rules that save a lot of pain later: **no business logic in templates** — if a template needs a calculation, do it in the route or a helper; and **never build HTML with string concatenation in Python** — Jinja autoescapes, your concatenation will not.
 
 ### The editor specification
 
@@ -548,7 +620,7 @@ Cutting a feature for a stated ethical reason, and writing the reason down, demo
 ```
 VPS
  └── docker compose
-      ├── api        (FastAPI/Flask + uvicorn/gunicorn)
+      ├── web        (Flask + gunicorn, serves pages and API)
       ├── worker     (grading loop)
       ├── mysql      (with a named volume)
       ├── judge0     (server + workers + its own db/redis)
@@ -569,6 +641,9 @@ Nightly `mysqldump` to a private repository or cloud drive. If we lose an exam's
 | Student extending their own time | Deadline lives in the database, set at start, never accepted from the client |
 | One student viewing another's submission | Authorisation checks on every read, tested explicitly |
 | Credentials in the repository | `.env` gitignored from commit one, `.env.example` committed, secrets as server environment variables |
+| CSRF on form POSTs | Flask-WTF CSRF protection enabled globally. Every Jinja form includes the token. JSON endpoints called from our own pages send the token in a header |
+| Session cookie theft | Flask-Login with `HttpOnly`, `Secure` and `SameSite=Lax` cookies, and a strong `SECRET_KEY` from the environment — never committed |
+| XSS through a question statement or student code shown to a teacher | Jinja autoescaping stays on. Never use `\|safe` on anything a user typed. Student code is displayed inside `<pre>`, escaped |
 | Exam paper leaking before the exam | Questions are not readable through the API until the exam opens |
 
 Each of these becomes a test. "We wrote a test that proves a student cannot fetch another student's submission" is a strong sentence in a viva.
@@ -580,6 +655,7 @@ Each of these becomes a test. "We wrote a test that proves a student cannot fetc
 - **Unit tests** — partial credit calculation, output comparison and whitespace normalisation, deadline arithmetic with time multipliers, state transitions
 - **Integration tests** — the whole submission path: create exam, start session, submit, grade, override, export
 - **Authorisation tests** — one per row of the threat model in section 16
+- **Template and route tests** — every page route returns 200 for the right role and 403 for the wrong one; forms reject a missing CSRF token; no template renders unescaped user input
 - **Adversarial tests** — submit an infinite loop, a memory bomb, a syntax error, an empty file, and code that prints nothing. Each must return the correct distinct status and must not disturb other submissions
 - **Load test** — 30 concurrent submissions in week 13, with a graph of queue depth and latency for the report
 - **A full exam rehearsal** — the six of us sit a real exam on the system, at the same time, in week 15
@@ -592,26 +668,35 @@ CI runs unit, integration and authorisation tests on every pull request. Broken 
 
 ```
 codeexam/
-├─ backend/
-│  ├─ app/
-│  │  ├─ main.py
-│  │  ├─ routers/       auth · exams · questions · sessions ·
-│  │  │                 submissions · monitor · reports · admin
-│  │  ├─ models/        SQLAlchemy ORM
-│  │  ├─ schemas/       request and response shapes
-│  │  └─ services/
-│  │     ├─ grading.py      partial credit, status mapping
-│  │     ├─ judge0.py       the only file that talks to Judge0
-│  │     └─ sessions.py     state machine, deadlines
-│  ├─ worker/           grading loop
-│  └─ tests/
-├─ frontend/            one file per page, js/api.js, js/editor.js
-├─ db/                  migrations (Alembic), seed.py
+├─ app/
+│  ├─ __init__.py       create_app(), extensions, blueprint registration
+│  ├─ config.py         config classes, reads .env
+│  ├─ models/           SQLAlchemy ORM
+│  ├─ forms/            Flask-WTF form classes (exam, question, override)
+│  ├─ views/            PAGE blueprints — render_template only
+│  │                    auth · student · teacher · admin
+│  ├─ api/              JSON blueprints — jsonify only
+│  │                    sessions · code · grading · monitor · system
+│  ├─ services/
+│  │  ├─ grading.py     partial credit, status mapping
+│  │  ├─ judge0.py      the only file that talks to Judge0
+│  │  └─ sessions.py    state machine, deadlines
+│  ├─ templates/        see section 12
+│  └─ static/
+│     ├─ css/           app.css
+│     └─ js/            editor.js · timer.js · autosave.js ·
+│                       monitor.js · api.js
+├─ worker/              grading loop (separate process)
+├─ migrations/          Flask-Migrate / Alembic
+├─ tests/
 ├─ infra/               docker-compose.yml, Caddyfile, deploy notes
 ├─ docs/                ERD, API notes, threat model, load-test results
 ├─ .github/workflows/   ci.yml
+├─ wsgi.py              gunicorn entry point
 └─ README.md
 ```
+
+**The one structural rule:** a file in `views/` never returns JSON, and a file in `api/` never renders a template. When that line blurs, nobody can tell what a route does without reading it.
 
 **Branching:** protected `main`, `develop` for integration, short `feat/<issue>-<slug>` branches that live three days at most. One approving review from someone who did not write the code. Squash merge.
 
@@ -626,8 +711,8 @@ codeexam/
 | Infrastructure and DevOps | Judge0 deployment, grading worker, queue and burst handling, docker-compose, CI, VPS, backups, the state machine | Containers, resource isolation, queueing, deployment, reliability |
 | Backend — exams | Auth, exam and question CRUD, test cases, classes, roster import | REST design, SQLAlchemy, Alembic |
 | Backend — sessions | Session lifecycle, auto-save, deadlines, submission endpoints | Stateful API design, concurrency edge cases |
-| Frontend — student | Exam screen, Monaco configuration, timer, navigator, run panel | Editor integration, fetch, UI state |
-| Frontend — teacher | Authoring, monitoring, review, results, analytics | Tables, forms, charts, dashboards |
+| Frontend — student | Exam screen template and its JS: Monaco configuration, countdown, auto-save, run panel, navigator | Jinja, editor integration, fetch, UI state |
+| Frontend — teacher | `base.html` and the shared partials, authoring forms, monitoring, review, results, analytics | Jinja, Flask-WTF forms, tables, Chart.js |
 | QA and documentation | Test suite, adversarial tests, load test, user testing with a real lecturer, report, demo video | Testing, technical writing, presenting |
 
 **The dependency to manage:** everyone waits on the submission and grading response format. Whoever owns infrastructure must ship a *stub* `POST /submissions` in week 3 that returns a hardcoded graded result in the final shape. Five people then build for weeks without being blocked.
@@ -653,7 +738,8 @@ codeexam/
 
 **Gate: by week 8 we demo end to end — start an exam, write code, run it, submit, see it graded.** Book that supervisor meeting in week 1.
 
-- Auth, exam and question authoring, test cases
+- Auth with Flask-Login, `base.html` and the shared partials agreed early so nobody builds pages twice
+- Exam and question authoring as Jinja forms with CSRF
 - Session start, server-side deadline, auto-save
 - Monaco configured and locked down, run against visible tests
 - Real grading through Judge0, partial credit, all statuses handled
@@ -714,7 +800,6 @@ That last sentence is the real acceptance test. Write it on the wall.
 
 ### Ask the module leader
 
-- Flask or FastAPI? If Flask is acceptable we take it, since we are taught it in depth and can get help debugging
 - Confirm in writing that the machine learning component is optional. The original brief listed it as required and this project has none
 - Confirm that CRUD variants count separately toward the 35-feature requirement
 - Can we book a supervisor demo for week 8 now?
