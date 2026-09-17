@@ -287,7 +287,50 @@ Say this explicitly in the report. "We chose server-side rendering for the pages
     Everything above runs on one VPS via docker compose.
 ```
 
-The important structural point: **the API never executes student code itself.** It writes a submission row and returns. A separate worker picks it up and talks to Judge0. That separation is what keeps the exam responsive when thirty students submit at once, and it is what makes the system recoverable when execution fails.
+The important structural point: **Flask never executes student code itself.** The request handler writes a submission row and returns. A separate worker process picks it up and talks to Judge0. That separation is what keeps the exam responsive when thirty students submit at once, and it is what makes the system recoverable when execution fails.
+
+### The Flask stack, and why each piece is there
+
+| Package | Role | Why we need it |
+| --- | --- | --- |
+| `Flask` | The web framework | Page routes and JSON routes, organised as blueprints |
+| `Jinja2` | Templating | Ships with Flask. Renders every page on the server |
+| `Flask-SQLAlchemy` | ORM | Talks to MySQL with Python objects instead of SQL strings |
+| `Flask-Migrate` | Migrations (Alembic) | One command and everyone's database matches. Without it, six people drift into six schemas |
+| `Flask-Login` | Session auth | Cookie sessions, `@login_required`, `current_user` in templates |
+| `Flask-WTF` | Forms + CSRF | Form validation and CSRF tokens. **Not optional** once forms post to the server |
+| `PyMySQL` | MySQL driver | Pure Python, installs cleanly in a container |
+| `python-dotenv` | Config | Reads `.env` in development; real environment variables in production |
+| `requests` | HTTP client | The only thing `judge0.py` uses |
+| `gunicorn` | WSGI server | Runs Flask in production. The dev server is never exposed |
+| `pytest` + `pytest-flask` | Testing | Flask's test client drives routes without a browser |
+
+Deliberately **not** used: Flask-RESTful, Flask-Marshmallow, Celery. Plain blueprints returning `jsonify()` are enough for 30 endpoints, and Celery is more machinery than our queue needs.
+
+### How the grading worker runs
+
+The worker is a plain Python process in the same repository, started as its own container. It does not serve HTTP.
+
+```python
+# worker/run.py
+from app import create_app, db
+from app.services import grading
+
+app = create_app()
+
+while True:
+    with app.app_context():            # reuse the same models and config
+        submission = grading.claim_next()   # SELECT ... FOR UPDATE SKIP LOCKED
+        if submission is None:
+            time.sleep(1)
+            continue
+        grading.grade(submission)      # calls Judge0 per test case
+```
+
+Two decisions worth writing down:
+
+- **The queue is a MySQL table, not Redis.** `submissions.status = 'queued'` is the queue. Claiming a row uses `SELECT ... FOR UPDATE SKIP LOCKED` so two workers never grade the same submission. This is less machinery to learn, one fewer service to run, and it means the queue survives a restart. If load testing in week 13 shows it cannot keep up, we can move to RQ then — and that decision, with the measurement behind it, belongs in the report either way.
+- **The worker shares the app factory.** It calls `create_app()` and runs inside `app.app_context()`, so it uses exactly the same models, config and database connection settings as the web process. No duplicated configuration.
 
 ---
 
@@ -463,6 +506,8 @@ Form POSTs (create exam, add question, override a grade, upload roster) post to 
 
 ### JSON API routes (REST)
 
+All JSON routes live under `/api/`, return `jsonify()`, and never render a template.
+
 | Group | Endpoints |
 | --- | --- |
 | Sessions | `POST /api/exams/<id>/start` · `GET /api/sessions/<id>/state` (time remaining, per-question status) · `POST /api/sessions/<id>/submit` · `POST /api/sessions/<id>/extend` |
@@ -621,7 +666,7 @@ Cutting a feature for a stated ethical reason, and writing the reason down, demo
 VPS
  └── docker compose
       ├── web        (Flask + gunicorn, serves pages and API)
-      ├── worker     (grading loop)
+      ├── worker     (same image, runs worker/run.py instead)
       ├── mysql      (with a named volume)
       ├── judge0     (server + workers + its own db/redis)
       └── caddy      (TLS termination, reverse proxy)
@@ -652,7 +697,7 @@ Each of these becomes a test. "We wrote a test that proves a student cannot fetc
 
 ## 17. Testing strategy
 
-- **Unit tests** — partial credit calculation, output comparison and whitespace normalisation, deadline arithmetic with time multipliers, state transitions
+- **Unit tests** — pure functions, no Flask needed: partial credit calculation, output comparison and whitespace normalisation, deadline arithmetic with time multipliers, state transitions
 - **Integration tests** — the whole submission path: create exam, start session, submit, grade, override, export
 - **Authorisation tests** — one per row of the threat model in section 16
 - **Template and route tests** — every page route returns 200 for the right role and 403 for the wrong one; forms reject a missing CSRF token; no template renders unescaped user input
@@ -729,6 +774,7 @@ codeexam/
 
 - VPS purchased, access shared, Judge0 running on it and reachable
 - Repository, branch protection, issue board, roles agreed
+- App factory, blueprints and `base.html` agreed in week 2 — before anyone writes a page, so nobody builds the same layout twice
 - `docker compose up` works on all six machines
 - Database schema agreed, first migration written
 - Wireframes — use the SDLC coursework for this, not a separate example
